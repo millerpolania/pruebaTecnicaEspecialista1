@@ -1,0 +1,140 @@
+# ════════════════════════════════════════════════════════════════════════════
+# Author: Miller Polania
+# ════════════════════════════════════════════════════════════════════════════
+
+from fastapi import APIRouter, Depends, HTTPException, status, Body
+from sqlalchemy.orm import Session
+from datetime import datetime
+from zoneinfo import ZoneInfo
+import structlog
+from ..database import get_db
+from .. import models, schemas
+
+# Mantenemos el router base quieto
+router = APIRouter(tags=["Accounts & Transfers"])
+logger = structlog.get_logger()
+
+
+@router.post("/core2/balance", response_model=schemas.BalanceQueryResponse)
+def get_balance(
+    payload: dict = Body(..., example={"userId": 1}),
+    db: Session = Depends(get_db)
+):
+    operation_name = "POST /core2/balance"
+    
+    # Extraemos de forma segura el userId del diccionario
+    user_id = payload.get("userId")
+    
+    if not user_id:
+        raise HTTPException(status_code=400, detail="El campo 'userId' es obligatorio en el cuerpo de la petición")
+    
+    account = db.query(models.BankAccount).filter(models.BankAccount.user_id == user_id).first()
+    if not account:
+        logger.error(
+            "Cuenta no encontrada",
+            operation=operation_name,
+            httpStatus=404,
+            errorCode="ACCOUNT_NOT_FOUND",
+            detail=f"No existe cuenta asociada al user_id: {user_id}"
+        )
+        raise HTTPException(status_code=404, detail="Cuenta no encontrada para este usuario")
+    
+    logger.info(
+        "Consulta de saldo exitosa vía POST", 
+        operation=operation_name,
+        httpStatus=200,
+        balance=float(account.balance)
+    )
+    
+    return {"account_id": account.id, "balance": account.balance}
+
+
+@router.post("/core3/transfers", status_code=status.HTTP_201_CREATED)
+def execute_transfer(payload: schemas.FundsTransferRequest, db: Session = Depends(get_db)):
+    operation_name = "POST /core3/transfers"
+
+    origin_acc = db.query(models.BankAccount).filter(models.BankAccount.user_id == payload.origin_user_id).first()
+    if not origin_acc:
+        logger.error(
+            "Transferencia fallida: Cuenta origen inexistente",
+            operation=operation_name,
+            httpStatus=404,
+            errorCode="ORIGIN_ACCOUNT_NOT_FOUND",
+            detail=f"BankUser ID {payload.origin_user_id} no registra cuenta activa"
+        )
+        raise HTTPException(status_code=404, detail="Cuenta origen no encontrada")
+
+    if origin_acc.balance < payload.amount:
+        logger.info(
+            "Transferencia rechazada: Fondos insuficientes", 
+            operation=operation_name,
+            status="REJECTED",
+            httpStatus=400,
+            user_id=payload.origin_user_id, 
+            amount=float(payload.amount)
+        )
+        raise HTTPException(status_code=400, detail="Fondos insuficientes para realizar la transferencia")
+
+    dest_user = db.query(models.BankUser).filter(models.BankUser.phone_number == payload.destination_phone).first()
+    if not dest_user:
+        logger.error(
+            "Transferencia fallida: Teléfono destino no registrado",
+            operation=operation_name,
+            httpStatus=404,
+            errorCode="DESTINATION_PHONE_NOT_FOUND",
+            detail=f"Teléfono {payload.destination_phone} no está asignado a ningún usuario"
+        )
+        raise HTTPException(status_code=404, detail="El número telefónico de destino no está registrado")
+    
+    if dest_user.id == payload.origin_user_id:
+        logger.info(
+            "Intento de transferencia a sí mismo bloqueado", 
+            operation=operation_name,
+            status="BLOCKED_OPERATION",
+            httpStatus=400,
+            user_id=payload.origin_user_id, 
+            phone=payload.destination_phone
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="No puedes realizar una transferencia a tu propio número de teléfono"
+        )
+    
+    dest_acc = db.query(models.BankAccount).filter(models.BankAccount.user_id == dest_user.id).first()
+    
+    try:
+        origin_acc.balance -= payload.amount
+        dest_acc.balance += payload.amount
+        
+        colombia_now = datetime.now(ZoneInfo("America/Bogota"))
+        
+        transfer_record = models.MovementRecord(
+            origin_account_id=origin_acc.id,
+            destination_phone=payload.destination_phone,
+            amount=payload.amount,
+            timestamp=colombia_now 
+        )
+        db.add(transfer_record)
+        db.commit() 
+        
+        logger.info(
+            "Transferencia ejecutada con éxito", 
+            operation=operation_name,
+            httpStatus=201,
+            origin=payload.origin_user_id, 
+            dest_phone=payload.destination_phone, 
+            amount=float(payload.amount),
+            hora_colombia=colombia_now.isoformat()
+        )
+                    
+        return {"status": "success", "message": "Transferencia completada"}
+    except Exception as e:
+        db.rollback()
+        logger.error(
+            "Fallo crítico en base de datos. Transacción revertida",
+            operation=operation_name,
+            httpStatus=500,
+            errorCode="TRANSACTION_DB_ROLLBACK",
+            detail=str(e)
+        )
+        raise HTTPException(status_code=500, detail="Error interno al procesar la transferencia")

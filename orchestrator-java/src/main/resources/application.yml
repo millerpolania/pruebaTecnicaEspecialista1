@@ -1,0 +1,14 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: orchestrator-service
+
+logging:
+  pattern:
+    console: '{"time": "%d{yyyy-MM-dd HH:mm:ss}", "level": "%p", "class": "%c", "msg": "%m"}%n'
+
+services:
+  auth-url: ${SERVICES_AUTH_URL:http://localhost:3001}
+  core-url: ${SERVICES_CORE_URL:http://localhost:8001}

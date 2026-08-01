@@ -1,0 +1,47 @@
+// ════════════════════════════════════════════════════════════════════════════
+// Author: Miller Polania
+// ════════════════════════════════════════════════════════════════════════════
+
+import axios from 'axios';
+
+const API_URL = '/api/v1/orchestrator';
+const AUTH_URL = '/api/v1/auth';
+
+const api = axios.create({
+  baseURL: API_URL,
+});
+
+const authApi = axios.create({
+  baseURL: AUTH_URL,
+});
+
+// Interceptor: Inyecta de forma automática el Bearer Token guardado
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('bank_session_token');
+  if (token) {
+    config.headers.Authorization = token;
+  }
+  config.headers['X-Correlation-ID'] = `front-tx-${Date.now()}`;
+  return config;
+}, (error) => {
+  return Promise.reject(error);
+});
+
+export const identityService = {
+  login: (username, password) => authApi.post('/login', { username, password }),
+  register: ({ username, email, documentType, documentId, password, phone_number }) => 
+    authApi.post('/register', { username, email, documentType, documentId, password, phone_number })
+};
+
+export const ledgerService = {
+  getBalance: (userId) => api.get(`/accounts/balance/${userId}`),
+  
+  getMovements: (userId) => api.get(`/movements/${userId}`),
+  
+  executeTransfer: (originUserId, destinationPhone, amount) => 
+    api.post('/transfers', { origin_user_id: originUserId, destination_phone: destinationPhone, amount: parseFloat(amount) }),
+
+  getNotifications: (userId) => api.get(`/notifications/${userId}`),
+};
+
+export default api;
